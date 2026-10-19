@@ -162,6 +162,21 @@ pub(super) fn argocd_sync_patch(prune: bool) -> Value {
     json!({ "operation": { "sync": { "prune": prune } } })
 }
 
+/// ArgoCD refresh patch, the same annotations Argo CD's own `RefreshApp`
+/// writes. The application controller re-compares the Application against Git
+/// when it sees `argocd.argoproj.io/refresh` (`normal` or `hard`; `hard` also
+/// invalidates the repo-server manifest cache), then removes it. It removes
+/// `refresh-timestamp` only while it still holds the value it read, so a
+/// refresh sent during a reconcile is not dropped; controllers that predate
+/// the timestamp ignore it.
+pub(super) fn argocd_refresh_patch(hard: bool, now: &str) -> Value {
+    let level = if hard { "hard" } else { "normal" };
+    json!({ "metadata": { "annotations": {
+        "argocd.argoproj.io/refresh": level,
+        "argocd.argoproj.io/refresh-timestamp": now,
+    } } })
+}
+
 pub(super) fn external_secret_refresh_patch(force_sync: &str) -> Value {
     json!({
         "metadata": { "annotations": { "force-sync": force_sync } }

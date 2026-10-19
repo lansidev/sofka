@@ -23,6 +23,7 @@ mod plugin_form;
 mod popup_wrapping;
 mod proxy;
 mod rbac;
+mod rediscovery;
 mod restart;
 mod resume;
 mod rollout;
@@ -7796,6 +7797,77 @@ async fn argocd_menu_sync_now_patches_without_prune() {
 }
 
 #[tokio::test]
+async fn argocd_menu_refresh_sets_annotation_without_confirming() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook"]);
+
+    open_argocd_menu_item(&mut app, "Refresh");
+    assert_eq!(app.mode, Mode::Table, "a refresh does not confirm");
+    assert!(app.flash.contains("refreshing guestbook"), "{}", app.flash);
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("refresh requested: guestbook")
+    })
+    .await;
+    assert!(!app.flash_err, "{}", app.flash);
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert!(
+        log[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("/namespaces/argocd/applications/guestbook"),
+        "{}",
+        log[0]["path"]
+    );
+    let annotations = &log[0]["body"]["metadata"]["annotations"];
+    assert_eq!(annotations["argocd.argoproj.io/refresh"], "normal");
+    assert!(
+        annotations["argocd.argoproj.io/refresh-timestamp"]
+            .as_str()
+            .unwrap()
+            .parse::<k8s_openapi::jiff::Timestamp>()
+            .is_ok(),
+        "{annotations}"
+    );
+    assert_eq!(annotations.as_object().unwrap().len(), 2, "{annotations}");
+    assert!(app.journal.lines().iter().any(|l| l.contains("refresh")));
+}
+
+#[tokio::test]
+async fn argocd_hard_refresh_patches_every_marked_application() {
+    let (mut app, mut rx, log) = argocd_patch_app(&["guestbook", "frontend", "backend"]);
+    app.marked.insert("argocd/guestbook".into());
+    app.marked.insert("argocd/frontend".into());
+
+    open_argocd_menu_item(&mut app, "Hard refresh");
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        app.flash.contains("hard refreshing 2 applications"),
+        "{}",
+        app.flash
+    );
+    drain_until(&mut app, &mut rx, |app| {
+        app.flash.contains("hard refresh requested: 2 applications")
+    })
+    .await;
+    assert!(!app.flash_err, "{}", app.flash);
+    let log = log.lock().unwrap();
+    let mut paths: Vec<&str> = log.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    paths.sort();
+    assert_eq!(paths.len(), 2);
+    assert!(paths[0].ends_with("/applications/frontend"), "{paths:?}");
+    assert!(paths[1].ends_with("/applications/guestbook"), "{paths:?}");
+    for entry in log.iter() {
+        let annotations = &entry["body"]["metadata"]["annotations"];
+        assert_eq!(annotations["argocd.argoproj.io/refresh"], "hard");
+        assert!(
+            annotations["argocd.argoproj.io/refresh-timestamp"].is_string(),
+            "{annotations}"
+        );
+    }
+    assert!(app.marked.is_empty());
+}
+
+#[tokio::test]
 async fn argocd_sync_with_prune_patches_every_marked_application() {
     let (mut app, mut rx, log) = argocd_patch_app(&["guestbook", "frontend", "backend"]);
     app.marked.insert("argocd/guestbook".into());
@@ -14972,6 +15044,10 @@ async fn debug_prompt_prefills_image_then_shells_out_to_kubectl_debug() {
         !argv.iter().any(|a| a.starts_with("--target")),
         "no target when launched from the pod row: {argv:?}"
     );
+    assert!(
+        !argv.iter().any(|a| a.starts_with("--profile")),
+        "no profile unless configured: {argv:?}"
+    );
     // Recorded in the journal as a debug action.
     assert!(app.journal.lines().iter().any(|l| l.contains("debug")));
 }
@@ -14990,6 +15066,38 @@ async fn debug_from_container_picker_pins_target() {
         panic!("expected a debug shell");
     };
     assert!(argv.iter().any(|a| a == "--target=app"), "{argv:?}");
+}
+
+#[tokio::test]
+async fn configured_debug_profile_reaches_prompt_and_recovery_launches() {
+    let (mut app, _rx) = app_with_pod();
+    app.debug = crate::config::DebugConfig {
+        profile: Some("restricted".into()),
+        node_profile: Some("sysadmin".into()),
+        ..Default::default()
+    };
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "debug".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(matches!(app.prompt_kind, Some(PromptKind::Debug { .. })));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let Some(Suspend::Shell(argv)) = app.pending.take() else {
+        panic!("debug should suspend into a kubectl debug shell");
+    };
+    assert!(argv.iter().any(|a| a == "--profile=restricted"), "{argv:?}");
+    assert!(!argv.iter().any(|a| a == "--profile=sysadmin"), "{argv:?}");
+
+    // The `d` recovery from a failed shell launches through the same path.
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    complete_failed_shell(&mut app, MISSING_SHELL);
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    let Some(Suspend::Recovery { argv, .. }) = app.pending.take() else {
+        panic!("recovery should launch kubectl debug");
+    };
+    assert!(argv.iter().any(|a| a == "--profile=restricted"), "{argv:?}");
 }
 
 /// A one-node table with the cursor on it.
@@ -17780,6 +17888,7 @@ async fn user_view_wins_over_printer_columns() {
                 condition_match: crate::views::ConditionMatch::Type,
                 condition_field: None,
                 default: None,
+                regex: None,
             }],
             ..Default::default()
         })),
@@ -34182,6 +34291,59 @@ async fn image_tag_columns_render_selected_paths_and_filter_by_tag() {
     let (_, rows) = app.snapshot_table();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row[2] == "1.2.3"));
+}
+
+#[tokio::test]
+async fn regex_columns_show_the_extracted_value_and_filter_by_it() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [views."v1/nodes"]
+        replace = true
+        columns = [
+            { name = "NAME", builtin = "NAME" },
+            { name = "NODEGROUP", path = "/metadata/labels/eks.amazonaws.com~1nodegroup", regex = '^(.*)-[0-9]{18}[0-9a-f]{8}$' },
+            { name = "OS", path = "/status/nodeInfo/osImage", regex = '^(.*?) \(', default = "none (yet)" },
+            { name = "PODS", path = ["/spec/missing", "/spec/pods"], type = "number", regex = '[0-9]+' },
+            { name = "OPTIONAL", path = "/spec/pods", regex = '^(x)?[0-9]' },
+        ]
+        "#,
+    );
+    palette(&mut app, "nodes");
+    for (name, nodegroup, os, pods) in [
+        (
+            "a",
+            "default-a-20250314092215118700000003",
+            Some("Bottlerocket OS 1.66.0 (aws-k8s-1.36)"),
+            "12 pods",
+        ),
+        ("b", "system-b-2025031409221512340000000c", None, "3 pods"),
+        ("c", "manual", Some("Ubuntu 24.04"), "none"),
+    ] {
+        let mut node = json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": name, "labels": {"eks.amazonaws.com/nodegroup": nodegroup}},
+            "spec": {"pods": pods},
+        });
+        if let Some(os) = os {
+            node["status"] = json!({"nodeInfo": {"osImage": os}});
+        }
+        apply(&mut app, node);
+    }
+    let (headers, rows) = app.snapshot_table();
+    assert_eq!(headers, ["NAME", "NODEGROUP", "OS", "PODS", "OPTIONAL"]);
+    assert_eq!(
+        rows[0],
+        ["a", "default-a", "Bottlerocket OS 1.66.0", "12", "12 pods"]
+    );
+    assert_eq!(rows[1], ["b", "system-b", "none (yet)", "3", "3 pods"]);
+    assert_eq!(rows[2], ["c", "manual", "Ubuntu 24.04", "none", "none"]);
+    type_filter(&mut app, "pods>5");
+    assert_eq!(row_names(&app), ["a"]);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    type_filter(&mut app, "nodegroup=system-b");
+    assert_eq!(row_names(&app), ["b"]);
 }
 
 const PAGING_KEYS: &str = r#"

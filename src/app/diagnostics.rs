@@ -166,13 +166,23 @@ impl App {
     }
 
     pub fn flash_discovery_warnings(&mut self) {
-        let n = self.cluster.discovery_warnings.len();
-        if n == 0 || self.flash_err {
+        if self.flash_err {
             return;
         }
+        if let Some(warning) = self.discovery_warning() {
+            self.flash_warn(&warning);
+        }
+    }
+
+    /// The status-bar line for API groups the last discovery could not read.
+    pub(super) fn discovery_warning(&self) -> Option<String> {
+        let n = self.cluster.discovery_warnings.len();
+        if n == 0 {
+            return None;
+        }
         let noun = if n == 1 { "group" } else { "groups" };
-        self.flash_warn(&format!(
+        Some(format!(
             "API discovery could not read {n} API {noun}. Refer to :info for details."
-        ));
+        ))
     }
 }

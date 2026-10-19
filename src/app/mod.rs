@@ -129,14 +129,23 @@ pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "C
 /// disables auto-sync by removing `spec.syncPolicy.automated` and stashing the
 /// original value (including `prune`/`selfHeal`/`allowEmpty`) as a base64
 /// annotation; "Resume" restores it from the annotation, or defaults to an
-/// empty `automated: {}` when the annotation is absent. "Sync now" patches
+/// empty `automated: {}` when the annotation is absent. "Refresh" and "Hard
+/// refresh" set the `argocd.argoproj.io/refresh` annotation, which the
+/// controller clears after re-comparing against Git. "Sync now" patches
 /// the top-level `operation` field, which the ArgoCD application controller
 /// picks up — the same mechanism the `argocd app sync` API endpoint uses.
 /// "Sync with prune" sets `prune: true` on that operation, so resources no
 /// longer in Git are deleted, and asks for confirmation first. No `argocd`
 /// binary.
-pub const ARGOCD_MENU_ITEMS: &[&str] =
-    &["Suspend", "Resume", "Sync now", "Sync with prune", "Cancel"];
+pub const ARGOCD_MENU_ITEMS: &[&str] = &[
+    "Suspend",
+    "Resume",
+    "Refresh",
+    "Hard refresh",
+    "Sync now",
+    "Sync with prune",
+    "Cancel",
+];
 
 /// Items in the ArgoCD ApplicationSet action menu (`t`). Suspend/Resume
 /// toggle `spec.syncPolicy.applicationsSync`. There is no `none`/`disabled`
@@ -2544,6 +2553,17 @@ pub struct App {
     /// Lifecycle shared by notification watchers and their messages. Unlike
     /// the view generation, this advances only when the cluster context changes.
     pub(super) notify_epoch: u64,
+    /// Advances when the cluster context changes. Tags API discovery reruns
+    /// so a result for the previous cluster is dropped.
+    pub(super) context_epoch: u64,
+    /// When the last miss-triggered API discovery started or finished.
+    pub(super) last_rediscovery: Option<std::time::Instant>,
+    /// The `:` lookup waiting on that discovery, with the view generation it
+    /// was made in.
+    pending_rediscovery: Option<(u64, rediscovery::Retry)>,
+    /// The latest miss-triggered API discovery. Results of earlier runs are
+    /// dropped, so each retry is answered by its own discovery.
+    pub(super) rediscovery_request: u64,
     /// Notifications waiting for the main loop to deliver (bell, desktop
     /// escape sequence, notifier subprocess). Drained once per frame and
     /// joined, so a burst arriving in one batch is one delivery — sinks
@@ -2916,6 +2936,10 @@ impl App {
             notify_tasks: HashMap::new(),
             notify_notes: HashMap::new(),
             notify_epoch: 0,
+            context_epoch: 0,
+            last_rediscovery: None,
+            pending_rediscovery: None,
+            rediscovery_request: 0,
             pending_notify: Vec::new(),
             prev_revisions: PrevRevisions::default(),
             timeline_target: None,
@@ -3091,6 +3115,7 @@ mod pickers;
 mod plugins;
 mod pvcexplore;
 pub mod rbac;
+mod rediscovery;
 mod refresh;
 mod resume;
 mod rightsize;

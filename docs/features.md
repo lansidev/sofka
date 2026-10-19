@@ -221,6 +221,11 @@ include those conditions. Row filters can search the route paths.
   Resource names and built-in aliases take priority over discovered short names.
   Shared short names use group priority, then alphabetical group and resource
   order. User aliases override discovered aliases.
+  Discovery runs at connect. When a `:` lookup matches no known kind, sofka runs
+  discovery again in the background and retries the lookup, so a CRD installed
+  while sofka runs opens without a restart. It does this at most once every 5
+  seconds; the usual error shows if the kind is still unknown, with a note when
+  discovery could not read an API group.
   Sofka can connect when it cannot read one API group. Examples: the
   extension API server is down, or it sends an `apiVersion` that is not `v1`.
   Sofka does not load that group. It shows a warning at startup and a flash
@@ -307,7 +312,8 @@ include those conditions. Row filters can search the route paths.
   structured filters, and threshold colors. Custom text path columns support
   `format = "image-tag"` to show image tags, with registry ports and digests
   handled separately. Quantity path columns support `format = "cpu"` and
-  `format = "memory"` for millicore and Mi/Gi display. Sorting and numeric
+  `format = "memory"` for millicore and Mi/Gi display. Path columns accept
+  `regex` to show only the part of a value they need. Sorting and numeric
   filters use values before display rounding. An
   unknown custom resource picks up its CRD `additionalPrinterColumns`
   automatically. If no usable CRD columns are available, server Table columns
@@ -663,13 +669,21 @@ include those conditions. Row filters can search the route paths.
   (resolved the way helm-controller composes `releaseName`/`storageNamespace`):
   `⏎` shows a revision's values, `y` the rendered manifest, `d` the NOTES, `r`
   rolls back.
-- **Argo CD controls** (`t`) - a suspend/resume/sync-now/sync-with-prune menu for ArgoCD
+- **Argo CD controls** (`t`) - a suspend/resume/refresh/hard-refresh/sync-now/sync-with-prune menu for ArgoCD
   Applications, and a suspend/resume menu for ApplicationSets, built on native
   Kubernetes API patches. Suspend removes `spec.syncPolicy.automated` and
   stashes the original value (including `prune`/`selfHeal`/`allowEmpty`) as a
   base64 annotation so resume restores it exactly; ApplicationSet suspend sets
   `applicationsSync` to `create-only` (no `none` mode exists) and stashes the
-  original value the same way. Sync-now patches the top-level `operation`
+  original value the same way. Refresh sets the `argocd.argoproj.io/refresh`
+  annotation to `normal`, so the controller re-compares the Application
+  against Git and then clears it; hard refresh sets it to `hard`, which also
+  drops the repo-server manifest cache. Both also set
+  `argocd.argoproj.io/refresh-timestamp`, as Argo CD's own refresh does, so a
+  request sent while the controller is mid-reconcile isn't dropped. Neither asks first: the patch itself
+  only requests a comparison. On an Application with automated sync, though,
+  an OutOfSync result starts that sync right away, including its `prune` if
+  configured, just as the next periodic reconcile would. Sync-now patches the top-level `operation`
   field. Sync-with-prune does the same with `prune: true`, so resources no
   longer in Git are deleted; it asks first and is gated by `prune`
   guardrails. A plain sync never prunes, even when `syncPolicy.automated.prune`

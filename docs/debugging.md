@@ -237,8 +237,12 @@ Permission errors and connection failures do not trigger this recovery offer.
 `:debug` on a **pod** attaches a temporary ephemeral debug container with
 `kubectl debug`. sofka prompts for the image (prefilled from `[debug]`). An empty
 `command` starts an interactive shell (bash if the image has it, else sh), like
-the pod shell. `d` in the container picker sets `--target=<container>` so the
-debug container shares that container's process namespace. The ephemeral
+the pod shell. Set `profile` to pass `--profile=<profile>`, for example
+`restricted` where pod security admission or an OpenShift SCC rejects the debug
+container kubectl's default profile builds. Unset keeps kubectl's default. The
+`d` recovery from a failed shell uses the same setting. `d` in the container
+picker sets `--target=<container>` so the debug container shares that
+container's process namespace. The ephemeral
 container stays on the pod until the pod is recreated - Kubernetes can't remove
 it, so there's nothing for sofka to clean up.
 
@@ -255,6 +259,7 @@ done.
 [debug]
 image = "nicolaka/netshoot:latest"       # ephemeral (in-pod) debug image
 command = ["bash"]                       # entrypoint; omit for an interactive shell
+profile = "restricted"                   # pod kubectl debug --profile (optional)
 node_image = "nicolaka/netshoot:latest"  # node debug pod image
 node_namespace = "default"               # namespace the node debugger lands in
 node_profile = "sysadmin"                # kubectl debug --profile (optional)

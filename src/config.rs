@@ -720,6 +720,7 @@ pub fn pvc_explore_warnings(cfg: &PvcExploreConfig) -> Vec<String> {
 /// [debug]
 /// image = "nicolaka/netshoot:latest"   # ephemeral (in-pod) debug image
 /// command = ["bash"]                   # entrypoint; omit for a shell
+/// profile = "restricted"               # pod kubectl debug --profile (optional)
 /// node_image = "nicolaka/netshoot:latest"  # node debug pod image
 /// node_namespace = "default"           # namespace the node debugger lands in
 /// node_profile = "sysadmin"            # kubectl debug --profile (optional)
@@ -731,13 +732,16 @@ pub struct DebugConfig {
     pub image: String,
     /// Entrypoint for the ephemeral container. Empty = an interactive shell.
     pub command: Vec<String>,
+    /// `kubectl debug --profile` for pod debug containers (`general`,
+    /// `baseline`, `restricted`, …). `None` = kubectl's default profile.
+    pub profile: Option<String>,
     /// Image for a node debug pod (`kubectl debug node/<node>`).
     pub node_image: String,
     /// Namespace the node debugger pod is created in (so `:debug-clean` knows
     /// where to find it).
     pub node_namespace: String,
-    /// `kubectl debug --profile` for node debuggers (`legacy`, `sysadmin`,
-    /// `netadmin`, …). `None` = kubectl's default (`legacy`).
+    /// `kubectl debug --profile` for node debuggers (`sysadmin`, `netadmin`,
+    /// …). `None` = kubectl's default profile.
     pub node_profile: Option<String>,
 }
 
@@ -747,6 +751,7 @@ impl Default for DebugConfig {
         Self {
             image: "busybox:latest".into(),
             command: Vec::new(),
+            profile: None,
             node_image: "busybox:latest".into(),
             node_namespace: "default".into(),
             node_profile: None,
@@ -1051,6 +1056,9 @@ pub struct ViewColumnConfig {
     pub kind: Option<String>,
     /// Path display format: `image-tag` for text, `cpu` or `memory` for quantities.
     pub format: Option<String>,
+    /// Regex applied to a path value: the cell shows the first capture group,
+    /// or the whole match when the pattern has none.
+    pub regex: Option<String>,
     /// Only shown in wide mode.
     pub wide: bool,
     /// Fixed display width in columns (defaults to a flexible share).

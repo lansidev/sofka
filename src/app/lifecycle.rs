@@ -31,7 +31,10 @@ impl App {
             return;
         }
         let Some(kind) = self.cluster.resolve(&query.resource) else {
-            self.flash_warn(&format!("No resource matches '{}'", query.resource));
+            let miss = format!("No resource matches '{}'", query.resource);
+            if !self.rediscover_on_miss(rediscovery::Retry::Query(query)) {
+                self.flash_warn(&miss);
+            }
             return;
         };
         if let Some(ns) = &query.namespace
@@ -147,8 +150,14 @@ impl App {
                 self.open_ns_resources(ns);
             }
             None => {
-                self.flash = format!("No resource matches '{}'", input.trim());
-                self.flash_err = true;
+                let retry = rediscovery::Retry::Kind {
+                    input: input.to_string(),
+                    ns: ns.map(str::to_string),
+                };
+                if !self.rediscover_on_miss(retry) {
+                    self.flash = format!("No resource matches '{}'", input.trim());
+                    self.flash_err = true;
+                }
             }
         }
     }
@@ -2221,6 +2230,13 @@ impl App {
                         self.flash_warn(&format!("context switch failed: {e}"));
                     }
                 }
+            }
+            Msg::Rediscovered {
+                epoch,
+                request,
+                result,
+            } if epoch == self.context_epoch && request == self.rediscovery_request => {
+                self.apply_rediscovery(result);
             }
             Msg::CredentialsRenewed { attempt, result } => {
                 self.apply_renewed_credentials(attempt, result);

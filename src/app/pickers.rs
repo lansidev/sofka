@@ -952,6 +952,9 @@ impl App {
         self.reset_credential_renewal();
         let previous_kind = self.kind.clone().filter(|_| self.cluster.connected);
         self.stop_notifications();
+        self.context_epoch += 1;
+        self.pending_rediscovery = None;
+        self.last_rediscovery = None;
         let resolved = self.config.resolve(&name, &cluster.cluster_name);
         self.user_aliases = resolved.config.aliases;
         self.namespace_favorites = resolved.config.favorite_namespaces;

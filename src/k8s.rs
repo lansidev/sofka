@@ -1107,12 +1107,21 @@ impl Cluster {
     async fn discover(&mut self) -> Result<()> {
         // Aggregated discovery needs two requests and tolerates stale APIService
         // entries. Legacy discovery is used when negotiation fails.
-        let discovered = discovery::discover(&self.client).await?;
+        let discovered = rediscover(&self.client).await?;
+        self.apply_discovery(discovered);
+        Ok(())
+    }
+
+    /// Rebuild the registry, catalog, child kinds and discovery warnings from
+    /// a discovery result. User aliases are not carried over; re-apply them
+    /// with [`Self::add_aliases`].
+    pub fn apply_discovery(&mut self, discovery: Discovery) {
+        let discovered = discovery.0;
         self.child_kinds = discovered.child_kinds;
         self.discovery_warnings = discovered.skipped;
         self.discovery_fallback = discovered.fallback;
+        self.registry.clear();
         self.register_resources(discovered.resources);
-        Ok(())
     }
 
     fn register_resources(&mut self, mut resources: Vec<discovery::Resource>) {
@@ -1396,6 +1405,14 @@ impl Cluster {
             Ok(vec![])
         }
     }
+}
+
+/// One API discovery run, applied to a cluster with [`Cluster::apply_discovery`].
+pub struct Discovery(discovery::Discovered);
+
+/// Run API discovery again, off the UI thread, for a connected cluster.
+pub async fn rediscover(client: &Client) -> Result<Discovery> {
+    Ok(Discovery(discovery::discover(client).await?))
 }
 
 /// Every namespaced kind the cluster serves `list` on, from a fresh API
@@ -1901,6 +1918,29 @@ impl Cluster {
             self.catalog.push(qualified);
         }
         self.catalog.sort();
+    }
+
+    /// The discovery a real cluster serving this fixture's kinds would return.
+    pub fn fake_discovery(&self) -> Discovery {
+        let mut resources: Vec<discovery::Resource> = Vec::new();
+        for kind in self.registry.values() {
+            if !resources
+                .iter()
+                .any(|r| r.kind.ar.group == kind.ar.group && r.kind.ar.kind == kind.ar.kind)
+            {
+                resources.push(discovery::Resource {
+                    kind: kind.clone(),
+                    short_names: Vec::new(),
+                    listable: true,
+                });
+            }
+        }
+        Discovery(discovery::Discovered {
+            resources,
+            child_kinds: self.child_kinds.clone(),
+            skipped: self.discovery_warnings.clone(),
+            fallback: self.discovery_fallback.clone(),
+        })
     }
 
     /// Drop every index entry for one kind, for a test of a cluster that does
