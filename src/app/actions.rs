@@ -449,7 +449,8 @@ impl App {
             self.flash_warn("no owner reference");
             return;
         };
-        let Some(kind) = self.cluster.resolve(&owner.kind.to_lowercase()) else {
+        let group = owner.api_version.split_once('/').map_or("", |(g, _)| g);
+        let Some(kind) = self.cluster.resolve_in_group(&owner.kind, group) else {
             self.flash_warn(&format!("owner kind {} unresolved", owner.kind));
             return;
         };

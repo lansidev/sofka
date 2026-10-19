@@ -65,7 +65,10 @@ impl App {
             .cloned();
         let owner_kind = owner_ref
             .as_ref()
-            .and_then(|o| self.cluster.resolve(&o.kind.to_lowercase()))
+            .and_then(|o| {
+                let group = o.api_version.split_once('/').map_or("", |(g, _)| g);
+                self.cluster.resolve_in_group(&o.kind, group)
+            })
             .map(|k| (k.ar, k.namespaced));
 
         let client = self.cluster.client.clone();

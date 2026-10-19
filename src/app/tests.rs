@@ -4284,8 +4284,14 @@ async fn jump_owner_uses_owner_scope_and_restores_child_view() {
         for (api_version, owner_kind, owner_plural, expected_namespace) in [
             ("v1", "Node", "nodes", ""),
             ("apps/v1", "Deployment", "deployments", "kube-system"),
+            // A CRD sharing the core `Service` kind name, as discovery leaves
+            // the bare `service` key to the core group.
+            ("example.com/v1", "Service", "services", "kube-system"),
         ] {
             let (mut app, _rx) = test_app();
+            app.cluster
+                .register_kind("example.com", "Service", "services", true);
+            app.cluster.register_kind("", "Service", "services", true);
             app.switch_kind_ns("pods", Some(source_namespace));
             apply(
                 &mut app,
@@ -4310,6 +4316,7 @@ async fn jump_owner_uses_owner_scope_and_restores_child_view() {
             });
             app.handle_key(press(KeyCode::Char('J'))).unwrap();
             assert_eq!(app.kind_plural, owner_plural);
+            assert_eq!(app.kind.as_ref().unwrap().ar.api_version, api_version);
             assert_eq!(app.namespace, expected_namespace);
             assert_eq!(
                 app.watch_key.as_ref().unwrap().namespace,
@@ -11781,6 +11788,59 @@ async fn bundle_logs_follow_the_default_container_annotation() {
             "{annotation}: {queries:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn bundle_fetches_the_owner_from_its_own_api_group() {
+    let (mut app, mut rx) = app_with_pod();
+    app.cluster
+        .register_kind("example.com", "Service", "services", true);
+    // Discovery leaves the bare `service` key to the core group.
+    app.cluster.register_kind("", "Service", "services", true);
+    apply(
+        &mut app,
+        json!({"apiVersion":"v1", "kind":"Pod",
+        "metadata":{"name":"a", "namespace":"default", "ownerReferences":[{
+            "apiVersion":"example.com/v1", "kind":"Service",
+            "name":"parent", "uid":"parent-uid"}]}}),
+    );
+    let (seen, paths) = std::sync::mpsc::channel();
+    app.cluster.client = kube::Client::new(
+        tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let _ = seen.send(request.uri().path().to_owned());
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(404)
+                        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                            json!({"kind": "Status", "apiVersion": "v1",
+                            "status": "Failure", "reason": "NotFound", "code": 404})
+                            .to_string(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        }),
+        "default",
+    );
+    for key in ":bundle".chars() {
+        app.handle_key(press(KeyCode::Char(key))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(rx.recv().await, Some(Msg::Bundle { .. }) | None) {}
+    })
+    .await
+    .expect("bundle must finish");
+    let paths: Vec<String> = paths.try_iter().collect();
+    assert!(
+        paths.contains(&"/apis/example.com/v1/namespaces/default/services/parent".into()),
+        "{paths:?}"
+    );
+    assert!(
+        !paths.contains(&"/api/v1/namespaces/default/services/parent".into()),
+        "{paths:?}"
+    );
 }
 
 /// A pod client whose log endpoint answers `from-<container>` and records
